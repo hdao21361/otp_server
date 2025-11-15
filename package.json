@@ -1,5 +1,5 @@
 {
-  "name": "otp-server",
+  "name": "otp-backend",
   "version": "1.0.0",
   "main": "otp_server.js",
   "type": "module",
@@ -7,11 +7,10 @@
     "start": "node otp_server.js"
   },
   "dependencies": {
+    "@sendgrid/mail": "^7.7.0",
     "cors": "^2.8.5",
+    "dotenv": "^16.4.0",
     "express": "^4.18.2",
-    "@sendgrid/mail": "^7.8.0",
-    "mongodb": "^6.5.0",
-    "helmet": "^7.0.0",
-    "dotenv": "^16.3.1"
+    "mongodb": "^6.5.0"
   }
 }
