@@ -24,19 +24,24 @@ if (!MONGO_URL || !SENDGRID_API_KEY || !FROM_EMAIL) {
 
 sgMail.setApiKey(SENDGRID_API_KEY);
 
+// === Mongo Collections ===
 let otps;
+let users;
 
-// init Mongo
+// Init Mongo
 async function initMongo() {
   const client = new MongoClient(MONGO_URL);
   await client.connect();
 
-  // CHỈNH QUAN TRỌNG: dùng đúng db "otpdb"
+  // CHỈNH QUAN TRỌNG → dùng db "otpdb"
   const db = client.db("otpdb");
+
   otps = db.collection("otps");
+  users = db.collection("users");
 
   await otps.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
   await otps.createIndex({ email: 1, used: 1 });
+  await users.createIndex({ email: 1 }, { unique: true });
 
   console.log("✅ Mongo connected + indexes OK");
 }
@@ -78,7 +83,7 @@ app.post("/send-otp", async (req, res) => {
       });
     }
 
-    // 2. hourly rate limit
+    // 2. hourly limit
     const hourAgo = new Date(now.getTime() - 3600 * 1000);
     const countLastHour = await otps.countDocuments({
       email,
@@ -92,7 +97,7 @@ app.post("/send-otp", async (req, res) => {
       });
     }
 
-    // 3. new OTP
+    // 3. create OTP
     const otp = genOtp();
     const expiresAt = new Date(now.getTime() + OTP_TTL_MINUTES * 60 * 1000);
 
@@ -117,7 +122,7 @@ app.post("/send-otp", async (req, res) => {
     return res.json({
       success: true,
       message: "Đã gửi OTP",
-      ...(dev ? { otp } : {})
+      ...(dev ? { otp } : {}) // trả OTP khi dev
     });
 
   } catch (err) {
@@ -151,12 +156,31 @@ app.post("/verify-otp", async (req, res) => {
       });
     }
 
+    // Đánh dấu OTP đã dùng
     await otps.updateOne(
       { _id: doc._id },
       { $set: { used: true, verifiedAt: new Date() } }
     );
 
-    return res.json({ success: true, message: "Xác minh thành công" });
+    // === LƯU TRẠNG THÁI 2FA ===
+    await users.updateOne(
+      { email },
+      {
+        $set: {
+          email,
+          twoFA: true,
+          method: "email",
+          updatedAt: new Date()
+        }
+      },
+      { upsert: true }
+    );
+
+    return res.json({
+      success: true,
+      message: "Xác minh thành công",
+      twoFA: true
+    });
 
   } catch (err) {
     console.error("verify-otp error:", err);
