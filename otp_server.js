@@ -28,14 +28,11 @@ sgMail.setApiKey(SENDGRID_API_KEY);
 let otps;
 let users;
 
-// Init Mongo
 async function initMongo() {
   const client = new MongoClient(MONGO_URL);
   await client.connect();
 
-  // CHỈNH QUAN TRỌNG → dùng db "otpdb"
   const db = client.db("otpdb");
-
   otps = db.collection("otps");
   users = db.collection("users");
 
@@ -46,6 +43,7 @@ async function initMongo() {
   console.log("✅ Mongo connected + indexes OK");
 }
 
+// Configuration
 const MIN_RESEND_SECONDS = 60;
 const MAX_PER_HOUR = 10;
 const OTP_TTL_MINUTES = 5;
@@ -70,46 +68,34 @@ app.post("/send-otp", async (req, res) => {
 
     const now = new Date();
 
+    // check if user already has 2FA enabled
+    const u = await users.findOne({ email });
+    if (u && u.twoFA === true) {
+      return res.status(400).json({ success: false, message: "2FA đã bật trước đó" });
+    }
+
     // 1. resend limit
     const recent = await otps.findOne({
       email,
       createdAt: { $gte: new Date(now.getTime() - MIN_RESEND_SECONDS * 1000) }
     });
-
     if (recent) {
-      return res.status(429).json({
-        success: false,
-        message: `Vui lòng chờ ${MIN_RESEND_SECONDS} giây trước khi gửi lại.`
-      });
+      return res.status(429).json({ success: false, message: `Vui lòng chờ ${MIN_RESEND_SECONDS} giây trước khi gửi lại.` });
     }
 
     // 2. hourly limit
     const hourAgo = new Date(now.getTime() - 3600 * 1000);
-    const countLastHour = await otps.countDocuments({
-      email,
-      createdAt: { $gte: hourAgo }
-    });
-
+    const countLastHour = await otps.countDocuments({ email, createdAt: { $gte: hourAgo } });
     if (countLastHour >= MAX_PER_HOUR) {
-      return res.status(429).json({
-        success: false,
-        message: "Quá nhiều yêu cầu, thử lại sau 1 giờ."
-      });
+      return res.status(429).json({ success: false, message: "Quá nhiều yêu cầu, thử lại sau 1 giờ." });
     }
 
-    // 3. create OTP
+    // generate and save OTP
     const otp = genOtp();
     const expiresAt = new Date(now.getTime() + OTP_TTL_MINUTES * 60 * 1000);
+    await otps.insertOne({ email, otp, used: false, createdAt: now, expiresAt });
 
-    await otps.insertOne({
-      email,
-      otp,
-      used: false,
-      createdAt: now,
-      expiresAt
-    });
-
-    // 4. send email
+    // send email
     await sgMail.send({
       to: email,
       from: FROM_EMAIL,
@@ -118,16 +104,11 @@ app.post("/send-otp", async (req, res) => {
     });
 
     const dev = process.env.NODE_ENV !== "production";
-
-    return res.json({
-      success: true,
-      message: "Đã gửi OTP",
-      ...(dev ? { otp } : {}) // trả OTP khi dev
-    });
+    return res.json({ success: true, message: "Đã gửi OTP", ...(dev ? { otp } : {}) });
 
   } catch (err) {
     console.error("send-otp error:", err);
-    res.status(500).json({ success: false, message: "Lỗi server khi gửi OTP" });
+    return res.status(500).json({ success: false, message: "Lỗi server khi gửi OTP" });
   }
 });
 
@@ -135,56 +116,29 @@ app.post("/send-otp", async (req, res) => {
 app.post("/verify-otp", async (req, res) => {
   try {
     const { email, otp } = req.body;
-
     if (!isValidEmail(email) || !otp) {
       return res.status(400).json({ success: false, message: "Dữ liệu không hợp lệ" });
     }
 
     const now = new Date();
 
-    const doc = await otps.findOne({
-      email,
-      otp,
-      used: false,
-      expiresAt: { $gte: now }
-    });
-
+    // find OTP doc
+    const doc = await otps.findOne({ email, otp, used: false, expiresAt: { $gte: now } });
     if (!doc) {
-      return res.status(400).json({
-        success: false,
-        message: "OTP không đúng hoặc đã hết hạn"
-      });
+      return res.status(400).json({ success: false, message: "OTP không đúng hoặc đã hết hạn" });
     }
 
-    // Đánh dấu OTP đã dùng
-    await otps.updateOne(
-      { _id: doc._id },
-      { $set: { used: true, verifiedAt: new Date() } }
-    );
+    // mark OTP used
+    await otps.updateOne({ _id: doc._id }, { $set: { used: true, verifiedAt: now } });
 
-    // === LƯU TRẠNG THÁI 2FA ===
-    await users.updateOne(
-      { email },
-      {
-        $set: {
-          email,
-          twoFA: true,
-          method: "email",
-          updatedAt: new Date()
-        }
-      },
-      { upsert: true }
-    );
+    // update user record: enable 2FA
+    await users.updateOne({ email }, { $set: { email, twoFA: true, method: "email", updatedAt: now } }, { upsert: true });
 
-    return res.json({
-      success: true,
-      message: "Xác minh thành công",
-      twoFA: true
-    });
+    return res.json({ success: true, message: "Xác minh thành công", twoFA: true });
 
   } catch (err) {
     console.error("verify-otp error:", err);
-    res.status(500).json({ success: false, message: "Lỗi server khi xác minh OTP" });
+    return res.status(500).json({ success: false, message: "Lỗi server khi xác minh OTP" });
   }
 });
 
